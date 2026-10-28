@@ -20,9 +20,18 @@
       "mod_model": "qwen3:8b",
       "num_ctx": 8192,
       "think": false
+    },
+    "openai": {
+      "url": "http://127.0.0.1:8080/v1",
+      "actor_model": "",
+      "director_model": "",
+      "action_model": "",
+      "mod_model": "",
+      "json_mode": "auto",
+      "extra_body": {}
     }
   },
-  "stt": { "enabled": true, "autostart": true, "url": "http://127.0.0.1:50000", "lang": "auto", "device": "cuda:0" },
+  "stt": { "enabled": true, "autostart": true, "url": "http://127.0.0.1:50000", "lang": "auto", "device": "auto" },
   "tts": {
     "enabled": true,
     "autostart": true,

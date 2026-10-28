@@ -79,7 +79,18 @@ if (KIOSK) document.body.classList.add('kiosk');
 
 // ---------- stage / audio ----------
 loadingProgress('world', 0);
-const avatar = new Avatar($('stage'), { onStatus: (s) => { $('avatar-status').textContent = s; }, onProgress: loadingProgress });
+// No WebGL, no sakura :(
+function noAvatar() {
+  return { speaking: false, clipNames: [], setEmotion() {}, setMouth() {}, setExpression() {}, playOnce() {}, playChain() {}, load: async () => {} };
+}
+let avatar;
+try {
+  avatar = new Avatar($('stage'), { onStatus: (s) => { $('avatar-status').textContent = s; }, onProgress: loadingProgress });
+} catch (e) {
+  console.error('3D view unavailable:', e);
+  avatar = noAvatar();
+  $('avatar-status').textContent = '3D view unavailable (WebGL is off or blocked). Chat still works: try another browser or turn on hardware acceleration.';
+}
 loadingProgress('world', 1);   // the environment is built synchronously in the constructor
 const player = new Player();
 let mode = 'web';

@@ -11,6 +11,7 @@ from enum import Enum
 from typing import List, Optional
 
 warnings.filterwarnings("ignore", message=".*ffmpeg.*")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
 import soundfile as sf
@@ -19,6 +20,7 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing_extensions import Annotated
 
+from devices import describe, resolve_device
 from model import SenseVoiceSmall
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
@@ -38,30 +40,60 @@ class Language(str, Enum):
     nospeech = "nospeech"
 
 
-DEVICE = os.getenv("STT_DEVICE", "cuda:0")
+if os.getenv("STT_THREADS", "").strip().isdigit() and int(os.environ["STT_THREADS"]) > 0:
+    torch.set_num_threads(int(os.environ["STT_THREADS"]))
+# STT_DEVICE: auto | cpu | cuda[:N] | xpu | mps
+DEVICE, _device_warning = resolve_device(os.getenv("STT_DEVICE", "auto"), torch)
+if _device_warning:
+    logger.warning(_device_warning)
 MODEL_DIR = os.getenv(
     "STT_MODEL",
     os.path.join(os.path.dirname(__file__), "models"),
 )
 
+
+
+def _load(device: str):
+    model, kw = SenseVoiceSmall.from_pretrained(model=MODEL_DIR, device=device)
+    model.eval()
+    return model, kw
+
+
 logger.info(f"Loading STT model from {MODEL_DIR} on {DEVICE} ...")
 load_start = time.time()
-m, kwargs = SenseVoiceSmall.from_pretrained(model=MODEL_DIR, device=DEVICE)
-m.eval()
+try:
+    m, kwargs = _load(DEVICE)
+except Exception as _e:
+    if DEVICE == "cpu":
+        raise
+    logger.warning(f"Loading on {DEVICE} failed ({_e}). Falling back to CPU")
+    DEVICE = "cpu"
+    m, kwargs = _load(DEVICE)
 load_elapsed = time.time() - load_start
 logger.info(f"Model loaded in {load_elapsed:.2f}s")
 
 regex = r"<\|.*?\|>"
 
-# Warm-up: the first CUDA inference pays for kernel selection / cuDNN autotune
-# (tens of seconds on a cold GPU). Do it once here so the first real request is fast.
+def _warm_up() -> None:
+    with torch.no_grad():
+        m.inference(data_in=[torch.zeros(16000, dtype=torch.float32)], language="auto", use_itn=True, ban_emo_unk=False, key=["warmup"], fs=16000, **kwargs)
+
+
 try:
     _warm_start = time.time()
-    m.inference(data_in=[torch.zeros(16000, dtype=torch.float32)], language="auto", use_itn=True,
-                ban_emo_unk=False, key=["warmup"], fs=16000, **kwargs)
+    _warm_up()
     logger.info(f"Warm-up inference done in {time.time() - _warm_start:.2f}s")
-except Exception as _e:  # noqa: BLE001 — warm-up is best-effort
-    logger.warning(f"Warm-up inference failed (continuing): {_e}")
+except Exception as _e:
+    if DEVICE != "cpu":
+        logger.warning(f"Warm-up on {DEVICE} failed ({_e}); falling back to CPU")
+        DEVICE = "cpu"
+        m, kwargs = _load(DEVICE)
+        try:
+            _warm_up()
+        except Exception as _e2:
+            logger.warning(f"Warm-up inference failed (continuing): {_e2}")
+    else:
+        logger.warning(f"Warm-up inference failed (continuing): {_e}")
 
 app = FastAPI(
     title="MekaHime STT API (modified SenseVoiceSmall)",
@@ -77,6 +109,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_SERVICE_TOKEN = os.getenv("SAKURA_SERVICE_TOKEN", "").strip()
+if _SERVICE_TOKEN:
+    import hmac
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    @app.middleware("http")
+    async def _require_token(request: Request, call_next):
+        if request.method == "OPTIONS" or request.url.path in ("/", "/health"):
+            return await call_next(request)
+        sent = request.headers.get("x-api-key") or request.headers.get("authorization", "")
+        if sent.lower().startswith("bearer "):
+            sent = sent[7:]
+        if not hmac.compare_digest(sent.strip().encode(), _SERVICE_TOKEN.encode()):
+            return JSONResponse({"detail": "missing or invalid service token"}, status_code=401)
+        return await call_next(request)
+
+
 @app.get("/")
 async def root():
     return {"service": "MekaHime STT (modified SenseVoiceSmall)", "docs": "/docs", "asr": "POST /api/v1/asr"}
@@ -87,9 +137,9 @@ async def health():
     return {
         "status": "ok",
         "model": MODEL_DIR,
-        "device": DEVICE,
-        "cuda_available": torch.cuda.is_available(),
-        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        **describe(torch, DEVICE),     # device, backend (cuda|rocm|xpu|mps|cpu), gpu_name, torch
+        "requested_device": os.getenv("STT_DEVICE", "auto"),
+        "cuda_available": torch.cuda.is_available(),   # kept for older clients
     }
 
 
@@ -138,15 +188,16 @@ async def asr(
 
     inference_start = time.time()
     try:
-        res = m.inference(
-            data_in=audios,
-            language=lang,
-            use_itn=use_itn,
-            ban_emo_unk=False,
-            key=key,
-            fs=TARGET_FS,
-            **kwargs,
-        )
+        with torch.no_grad(): # no need autograd graph we just do inference
+            res = m.inference(
+                data_in=audios,
+                language=lang,
+                use_itn=use_itn,
+                ban_emo_unk=False,
+                key=key,
+                fs=TARGET_FS,
+                **kwargs,
+            )
     except Exception as e:
         logger.error(f"Inference failed: {e}")
         raise HTTPException(status_code=500, detail=f"inference failed: {str(e)}")
@@ -184,5 +235,7 @@ if __name__ == "__main__":
 
     host = os.getenv("STT_HOST", "127.0.0.1")
     port = int(os.getenv("STT_PORT", "50000"))
+    if host not in ("127.0.0.1", "localhost", "::1") and not _SERVICE_TOKEN:
+        logger.warning(f"listening on {host} with NO SAKURA_SERVICE_TOKEN: anyone who can reach this port can use the service")
     logger.info(f"Starting server on {host}:{port}")
     uvicorn.run(app, host=host, port=port)

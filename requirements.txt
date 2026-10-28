@@ -1,4 +1,4 @@
-# OpenSakura backend (sakura/ + launch.py). Python 3.11.
+# OpenSakura backend (sakura/ + launch.py). Python 3.11 (recommended) or 3.12.
 fastapi>=0.110
 uvicorn[standard]>=0.27
 httpx>=0.25

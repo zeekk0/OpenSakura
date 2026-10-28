@@ -7,11 +7,13 @@ official FunAudioLLM release. ModelScope works too (see README).
 """
 from __future__ import annotations
 
+import os
 import sys
 import urllib.request
 from pathlib import Path
 
-URL = "https://huggingface.co/FunAudioLLM/SenseVoiceSmall/resolve/main/model.pt"
+# HF_ENDPOINT (e.g. https://hf-mirror.com) switches the download host for networks where huggingface.co is slow or blocked
+URL = (os.environ.get("HF_ENDPOINT") or "https://huggingface.co").rstrip("/") + "/FunAudioLLM/SenseVoiceSmall/resolve/main/model.pt"
 DEST = Path(__file__).resolve().parent.parent / "services" / "stt" / "models" / "model.pt"
 
 

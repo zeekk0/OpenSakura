@@ -79,8 +79,16 @@
         </label>
       </div>
       <div class="inline"><input type="text" id="ol-pull" placeholder="ollama model to pull, e.g. qwen3:8b"><button id="btn-ol-pull">Pull</button></div>
+      <div class="grid2">
+        <label>OpenAI-compatible URL (llama.cpp, LM Studio, vLLM, …) <span id="oa-status" class="tag"></span>
+          <div class="inline"><input type="text" id="oa-url" placeholder="http://127.0.0.1:8080/v1"><button id="btn-oa-test">Test</button></div>
+        </label>
+        <label>OpenAI-compatible API key (optional) <span id="oa-key-status" class="tag"></span>
+          <div class="inline"><input type="password" id="oa-key" placeholder="leave empty for local servers"><button id="btn-oa-save">Save</button></div>
+        </label>
+      </div>
       <table class="roles">
-        <thead><tr><th>role</th><th>provider</th><th>OpenRouter model</th><th>Ollama model</th></tr></thead>
+        <thead><tr><th>role</th><th>provider</th><th>OpenRouter model</th><th>Ollama model</th><th>OpenAI-compat model</th></tr></thead>
         <tbody id="roles-body"></tbody>
       </table>
       <div class="right"><button id="btn-llm-save" class="primary">Save LLM</button></div>
@@ -106,6 +114,8 @@
     </div>
 
     <div class="card">
+      <h3>Graphics</h3>
+      <label class="check"><input type="checkbox" id="gfx-lite"> Light graphics (weak GPU, old laptop, phone: no shadows, depth blur or antialiasing; reloads the page)</label>
       <h3>Reply behaviour</h3>
       <div class="toggles" id="reply-toggles"></div>
       <div class="row">
@@ -202,7 +212,7 @@
       <p><b>Sakura</b> is MekaHime's first prototype, now <b>open source</b>. She runs on your own machine: a brain with a
         26-emotion mood, favorability and per-user memory; a voice (a MekaHime build of GPT-SoVITS); ears
         (a MekaHime-modified SenseVoiceSmall); and a VRoid body on a three.js stage that acts out what she feels.
-        The language model is your choice — OpenRouter in the cloud or Ollama locally.</p>
+        The language model is your choice — OpenRouter in the cloud, Ollama locally, or any OpenAI-compatible server (llama.cpp, LM Studio, vLLM, ...).</p>
       <p>Project page: <a href="https://www.mekahime.com/sakura" target="_blank" rel="noopener">mekahime.com/sakura</a> ·
         Source code: <a href="https://github.com/zeekk0/OpenSakura" target="_blank" rel="noopener">github.com/zeekk0/OpenSakura</a></p>
     </div>
@@ -250,8 +260,8 @@
         user profiles and the cost ledger are plain JSON files in <code>data/</code> on your disk.</p>
       <p>Connections that do leave your computer, all visible in the code: (1) <b>your LLM provider</b>, if you choose
         OpenRouter — your messages, her persona and the memory notes relevant to the conversation go from <i>your</i>
-        computer straight to OpenRouter under their terms and never touch MekaHime (with every role on Ollama, nothing
-        leaves at all); (2) <b>DuckDuckGo</b>, when Sakura decides to look something up or fetch a picture for a friend or
+        computer straight to OpenRouter/remote OpenAI-compatible provider under their terms and never touch MekaHime (with every role on Ollama, or on an OpenAI-compatible server running on your own machine, nothing
+        leaves at all; (2) <b>DuckDuckGo</b>, when Sakura decides to look something up or fetch a picture for a friend or
         owner (the query is printed in the console), and pictures she finds are loaded from their original sites;
         (3) the three.js libraries from a public CDN; (4) one-time model downloads (SenseVoice weights, Ollama models) and
         OpenRouter's public price list for the cost counter.</p>

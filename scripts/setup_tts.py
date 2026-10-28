@@ -22,8 +22,7 @@ What it builds in vendor/tts-engine/ (everything but main.py and the docs is git
                             Sakura's voice from the Hugging Face repo MekaHime/MekaHime_Sakura (personal-use
                             license, accepted when the script asks)
 
-Needs Python 3.11 or 3.12 (scipy, onnxruntime and matplotlib at the pinned versions have no wheels for 3.10, and
-upstream's numpy<2 has none for 3.13); Linux with glibc 2.28 or newer; macOS 14 or newer on Apple Silicon.
+Needs Python 3.11 or 3.12 (scipy, onnxruntime and matplotlib at the pinned versions have no wheels for 3.10, numpy<2 has none for 3.13); Linux with glibc 2.28 or newer; macOS 14 or newer on Apple Silicon.
 
 Integrity: every model and data file, the voice weights (at a pinned revision of the voice repository) and the
 Windows ffmpeg build are checked against a size and SHA-256 pinned below; a download that does not match fails at
@@ -81,14 +80,16 @@ GPT_SOVITS_SELF_WRITTEN = {"GPT_SoVITS/text/g2pw/polyphonic.md5", "GPT_SoVITS/te
                            "GPT_SoVITS/configs/tts_infer.yaml"}
 
 TORCH_VERSION = "2.9.1"           # same torch/torchaudio pair the previous engine ran on an RTX 5070 (CUDA 12.8)
-TORCH_INDEX = {"cuda": "https://download.pytorch.org/whl/cu128", "cpu": "https://download.pytorch.org/whl/cpu"}
-TORCH_LOCAL = {"cuda": "+cu128", "cpu": "+cpu"}
+TORCH_INDEX = {"cuda": "https://download.pytorch.org/whl/cu128", "cpu": "https://download.pytorch.org/whl/cpu", "rocm": "https://download.pytorch.org/whl/rocm6.4", "xpu": "https://download.pytorch.org/whl/xpu"}
+TORCH_INDEX_OVERRIDE = ""         # set from --torch-index
+TORCH_LOCAL = {"cuda": "+cu128", "cpu": "+cpu", "rocm": "", "xpu": ""}
 # scipy 1.17.1, onnxruntime 1.31.0 and matplotlib 3.11.2 need 3.11+; numpy<2 (upstream pin) has no wheels for 3.13
 PY_MIN, PY_MAX, PY_TESTED = (3, 11), (3, 12), (3, 11)
 GLIBC_MIN = (2, 28)               # torch 2.9.1, onnxruntime 1.31.0, soundfile 0.14.0: manylinux_2_28 wheels only
 MACOS_MIN = (14, 0)               # onnxruntime 1.31.0: one macOS wheel, macosx_14_0_arm64, and no source package
 
 HF = "https://huggingface.co"
+HF_DL = (os.environ.get("HF_ENDPOINT") or HF).rstrip("/")
 PRETRAINED_REPO, PRETRAINED_REV = "lj1995/GPT-SoVITS", "8f8857563c040d542de108a2c18b0425abd6c9c5"
 PRETRAINED = [  # path in lj1995/GPT-SoVITS == path under GPT_SoVITS/pretrained_models, size, sha256
     ("chinese-hubert-base/config.json", 1449, "c3e5060a1277e0f078cc6be9da4528a605dba6ece93018981fe2c820e5c7b103"),
@@ -357,6 +358,14 @@ def find_base_python(explicit: Optional[str]) -> tuple[list[str], tuple[int, int
     if IS_WIN:
         cands += [["py", "-3.11"], ["py", "-3.12"]]
     cands += [[n] for n in ("python3.11", "python3.12") if shutil.which(n)]
+    if shutil.which("uv"):   # Python installed with `uv python install 3.11` lives outside PATH
+        for ver in ("3.11", "3.12"):
+            try:
+                found = subprocess.run(["uv", "python", "find", ver], capture_output=True, text=True, timeout=30).stdout.strip()
+            except Exception:  # noqa: BLE001
+                found = ""
+            if found:
+                cands.append([found])
     usable: list[tuple[list[str], tuple[int, int, int]]] = []
     for c in cands:
         v = py_version(c)
@@ -368,10 +377,10 @@ def find_base_python(explicit: Optional[str]) -> tuple[list[str], tuple[int, int
         c, v = usable[0]
         log(f"no Python 3.11 found; using {' '.join(c)} (Python {v[0]}.{v[1]}: it should work, but only 3.11 is tested)")
         return c, v
-    raise SetupError(f"the voice engine needs Python {PY_RANGE} (3.11 recommended): scipy, onnxruntime and matplotlib at "
-                     "the pinned versions need 3.11+, and upstream pins numpy<2, which has no wheels for 3.13+. Install "
-                     "Python 3.11 (python.org; Debian/Ubuntu: python3.11 and python3.11-venv) and re-run, or pass "
-                     "--python <path>.")
+    raise SetupError(f"the voice engine needs Python {PY_RANGE} (3.11 recommended); scipy, onnxruntime and matplotlib at "
+                     "the pinned versions need 3.11+, numpy<2 has no wheels for 3.13+. Install Python 3.12 or 3.11. "
+                     "easiest is `uv python install 3.11` (https://docs.astral.sh/uv/), or python.org / pyenv / your"
+                     "package manager (Debian/Ubuntu: python3.11 and python3.11-venv); then re-run, or pass --python <path>.")
 
 
 def venv_python(engine: Path) -> Path:
@@ -441,10 +450,18 @@ def pick_device(args: argparse.Namespace) -> str:
     if args.cpu or args.device == "cpu":
         return "cpu"
     if IS_MAC:
-        return "mac"            # PyPI torch: CPU + Apple MPS
-    if args.device == "cuda":
+        if args.device in ("rocm", "xpu", "cuda"):
+            raise SetupError(f"--device {args.device} does not exist on macOS; use auto (Apple GPU) or cpu")
+        return "mac" # PyPI torch: CPU + Apple MPS
+    if args.device == "rocm" and IS_WIN:
+        raise SetupError("ROCm PyTorch wheels are Linux only; use --device cpu on Windows")
+    if args.device in ("cuda", "rocm", "xpu"):
+        return args.device
+    if has_nvidia_gpu():
         return "cuda"
-    return "cuda" if has_nvidia_gpu() else "cpu"
+    if not IS_WIN and (shutil.which("rocminfo") or shutil.which("rocm-smi") or Path("/opt/rocm").exists()):
+        return "rocm"
+    return "cpu"
 
 
 def sysctl(name: str) -> str:
@@ -489,19 +506,23 @@ def ensure_torch(vpy: Path, device: str, reinstall: bool) -> Path:
     local = "" if device == "mac" else TORCH_LOCAL[device]
     want = f"{TORCH_VERSION}{local}"
     probe = ("import json, torch, torchaudio; print(json.dumps({'torch': torch.__version__, "
-             "'torchaudio': torchaudio.__version__, 'cuda': torch.version.cuda}))")
+             "'torchaudio': torchaudio.__version__, 'cuda': torch.version.cuda, 'hip': torch.version.hip}))")
     p = subprocess.run([str(vpy), "-c", probe], capture_output=True, text=True)
     cur = json.loads(p.stdout.strip().splitlines()[-1]) if p.returncode == 0 and p.stdout.strip() else {}
     good = cur.get("torch", "").split("+")[0] == TORCH_VERSION and cur.get("torchaudio", "").split("+")[0] == TORCH_VERSION
     if device == "cuda":
         good = good and str(cur.get("cuda") or "").startswith("12.8")
     elif device == "cpu":
-        good = good and not cur.get("cuda")
+        good = good and not cur.get("cuda") and not cur.get("hip")
+    elif device == "rocm":
+        good = good and bool(cur.get("hip"))
+    elif device == "xpu":
+        good = good and "+xpu" in str(cur.get("torch", ""))
     if good and not reinstall:
         row("OK ", "torch", f"torch {cur['torch']} / torchaudio {cur['torchaudio']} (CUDA {cur.get('cuda') or '-'}, existing)")
     else:
         log(f"installing torch {want} + torchaudio {want} ({'CUDA 12.8' if device == 'cuda' else device})")
-        idx = [] if device == "mac" else ["--index-url", TORCH_INDEX[device]]
+        idx = [] if device == "mac" else ["--index-url", TORCH_INDEX_OVERRIDE or TORCH_INDEX[device]]
         pip(vpy, *idx, f"torch=={want}", f"torchaudio=={want}")
         row("OK ", "torch", f"torch {want} / torchaudio {want} (installed)")
     cons = vpy.parent.parent / "opensakura-constraints.txt"
@@ -679,7 +700,7 @@ def ensure_pretrained(gsv: Path, ver: Verified) -> None:
     pm = gsv / "GPT_SoVITS" / "pretrained_models"
     states = []
     for rel, size, sha in PRETRAINED:
-        url = f"{HF}/{PRETRAINED_REPO}/resolve/{PRETRAINED_REV}/{rel}"
+        url = f"{HF_DL}/{PRETRAINED_REPO}/resolve/{PRETRAINED_REV}/{rel}"
         states.append(fetch(url, pm / rel, size, sha, ver, label=rel if size > 50e6 else None))
     total = sum(s for _, s, _ in PRETRAINED) / 1e9
     row("OK ", "pretrained models", f"HuBERT, RoBERTa, ERes2NetV2 sv ({total:.1f} GB, "
@@ -699,7 +720,7 @@ def ensure_g2pw(engine: Path, gsv: Path, ver: Verified, keep: bool) -> None:
         row("OK ", "G2PW", f"{onnx.parent} (verified)")
         return
     zpath = engine / "downloads" / G2PW_ZIP[0]
-    fetch(f"{HF}/{G2PW_REPO}/resolve/{G2PW_REV}/{G2PW_ZIP[0]}", zpath, G2PW_ZIP[1], G2PW_ZIP[2], ver,
+    fetch(f"{HF_DL}/{G2PW_REPO}/resolve/{G2PW_REV}/{G2PW_ZIP[0]}", zpath, G2PW_ZIP[1], G2PW_ZIP[2], ver,
           label="G2PW model (zip)")
     with zipfile.ZipFile(zpath) as z:
         names = z.namelist()
@@ -1160,8 +1181,9 @@ def optional_ffmpeg(engine: Path, ver: Verified, keep: bool) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Install the OpenSakura voice server (a MekaHime build of GPT-SoVITS)")
     ap.add_argument("--engine-dir", type=Path, default=SOURCE_ENGINE, help="default: vendor/tts-engine")
-    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
-                    help="torch build: auto = CUDA 12.8 when an NVIDIA GPU is visible (Windows/Linux), else CPU")
+    ap.add_argument("--device", choices=("auto", "cuda", "rocm", "xpu", "cpu"), default="auto",
+                    help="torch build to install. rocm and xpu (Intel Arc) are experimental")
+    ap.add_argument("--torch-index", default=None, help="override the PyTorch wheel index URL (advanced; e.g. a newer ROCm tag)")
     ap.add_argument("--cpu", action="store_true", help="same as --device cpu")
     ap.add_argument("--python", default=None, help="Python 3.11 (or 3.12) interpreter for the venv (default: the first "
                                                      "3.11 found: this one, py -3.11, python3.11; then 3.12)")
@@ -1203,8 +1225,10 @@ def main() -> int:
     steps = Steps()
     try:
         steps.run("engine files", sync_engine_files, engine)
+        global TORCH_INDEX_OVERRIDE
+        TORCH_INDEX_OVERRIDE = args.torch_index or ""
         device = pick_device(args)
-        log(f"torch build: {'CUDA 12.8' if device == 'cuda' else 'CPU + Apple MPS' if device == 'mac' else 'CPU'}")
+        log(f"torch build: {'CUDA 12.8' if device == 'cuda' else 'CPU + Apple MPS' if device == 'mac' else device.upper() + ' (experimental)' if device in ('rocm', 'xpu') else 'CPU'}")
         ver = Verified(engine / ".opensakura-verified.json")
         # the venv chain: each step needs the one before it
         vpy = steps.run("venv", ensure_venv, engine, args.python)

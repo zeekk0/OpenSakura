@@ -29,14 +29,14 @@ SETTINGS_PATH = CONFIG_DIR / "settings.json"
 EXAMPLE_PATH = CONFIG_DIR / "settings.example.json"
 ENV_PATH = ROOT / ".env"
 
-SECRET_KEYS = ("OPENROUTER_API_KEY", "DISCORD_BOT_TOKEN")
+SECRET_KEYS = ("OPENROUTER_API_KEY", "OPENAI_COMPAT_API_KEY", "SAKURA_SERVICE_TOKEN", "DISCORD_BOT_TOKEN")
 
 DEFAULTS: dict[str, Any] = {
     "mode": "web",                       # "web" | "discord"
     "persona_file": "config/sakura.json",
     "owner": {"name": "Master", "user_ids": []},   # web user (id 0) is always the owner
     "llm": {
-        # per-role provider: "openrouter" | "ollama"
+        # per-role provider: "openrouter" | "ollama" | "openai" (any OpenAI-compatible endpoint)
         "roles": {"actor": "openrouter", "director": "openrouter", "action": "openrouter", "mod": "openrouter"},
         "openrouter": {
             "actor_model": "google/gemini-2.5-flash",
@@ -55,13 +55,23 @@ DEFAULTS: dict[str, Any] = {
             "num_ctx": 8192,
             "think": False,
         },
+        "openai": {
+            "url": "http://127.0.0.1:8080/v1",\
+            "actor_model": "",         # empty = send "default" (single-model servers ignore it)
+            "director_model": "",
+            "action_model": "",
+            "mod_model": "",
+            "json_mode": "auto",       # auto (try, fall back) | on | off
+            "extra_body": {},          # e.g. {"chat_template_kwargs": {"enable_thinking": false}}
+        },
     },
     "stt": {
         "enabled": True,
         "autostart": True,               # launch.py starts services/stt
         "url": "http://127.0.0.1:50000",
         "lang": "auto",                  # auto | zh | en | yue | ja | ko
-        "device": "cuda:0",
+        "device": "auto",              # auto | cpu | cuda[:N] | xpu | mps  (auto: best available, falls back to CPU)
+        "threads": 0,                  # CPU threads for PyTorch, 0 = default (all cores)
     },
     "tts": {
         "enabled": True,
@@ -70,6 +80,8 @@ DEFAULTS: dict[str, Any] = {
         "engine_dir": "vendor/tts-engine",
         "character_id": "MekaHime_Sakura",
         "language": "English",
+        "device": "auto",                # auto | cuda | cuda:N | xpu | mps | cpu
+        "extra_args": [],                # extra voice-server flags, e.g. ["--batch-size", "1"] (CPU-only: one sentence at a time)
         "audio_format": "wav",           # wav decodes everywhere in the browser; opus is smaller
         "timeout_s": 45,
     },

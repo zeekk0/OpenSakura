@@ -34,7 +34,7 @@ Requests are spoken one at a time, in the order they arrive; a request's sentenc
 interleaved with another request's. When a client disconnects, its requests that have not started
 (and the sentences not yet spoken) are dropped.
 
-    python main.py --port 8002 --host 127.0.0.1 [--device auto|cuda|cuda:1|cpu|mps] [--no-half]
+    python main.py --port 8002 --host 127.0.0.1 [--device auto|cuda|cuda:1|xpu|cpu|mps] [--no-half]
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ import asyncio
 import copy
 import gc
 import hashlib
+import hmac
 import inspect
 import io
 import json
@@ -158,7 +159,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=SERVER_NAME)
     ap.add_argument("--port", type=int, default=8002)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--device", default="auto", help="auto (cuda > mps > cpu), cuda, cuda:N, cpu or mps")
+    ap.add_argument("--device", default="auto", help="auto (cuda/rocm > xpu > mps > cpu), cuda (also AMD ROCm builds), cuda:N, xpu (Intel, experimental), cpu or mps")
     ap.add_argument("--half", action=argparse.BooleanOptionalAction, default=None,
                     help="fp16 inference (default: on for CUDA, off elsewhere)")
     ap.add_argument("--character", default=None, help="speaker to load at start (default: first in Speakers/)")
@@ -194,6 +195,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                     help="at most this many extra takes of a run that came out too short (default: 2)")
     ap.add_argument("--no-cuda-graph", action="store_true", help="disable upstream's CUDA-graph AR acceleration")
     ap.add_argument("--no-warmup", action="store_true")
+    ap.add_argument("--token", default=os.environ.get("SAKURA_SERVICE_TOKEN", ""),
+                    help="shared secret (default: env SAKURA_SERVICE_TOKEN). When set, every route except / and /ping, and the "
+                         "Socket.IO connection, needs 'Authorization: Bearer <token>' or 'X-Api-Key: <token>'. Use it whenever "
+                         "--host is not 127.0.0.1 (see distributed/README.md)")
     ap.add_argument("--cors", action="store_true", help="allow browser pages from any origin (local testing)")
     ap.add_argument("--verbose", action="store_true", help="show upstream GPT-SoVITS console output")
     args = ap.parse_args(argv)
@@ -891,6 +896,7 @@ class VoiceEngine:
         self.error = ""
         self.load_s = 0.0
         self.warmup_s = 0.0
+        self.rocm = False
         self.requests = 0
         self.retries = 0                # runs the dropout guard synthesized a second time
         self.gpu = ""
@@ -904,10 +910,19 @@ class VoiceEngine:
         import torch
         want = (self.args.device or "auto").lower()
         mps = getattr(torch.backends, "mps", None)
+        xpu = getattr(torch, "xpu", None)
+        try:
+            xpu_ok = bool(xpu and xpu.is_available())
+        except Exception:  # noqa: BLE001
+            xpu_ok = False
         if want == "auto":
-            dev = "cuda" if torch.cuda.is_available() else "mps" if (mps and mps.is_available()) else "cpu"
+            dev = ("cuda" if torch.cuda.is_available() else "xpu" if xpu_ok
+                   else "mps" if (mps and mps.is_available()) else "cpu")
         elif want.startswith("cuda") and not torch.cuda.is_available():
             LOG.warning("CUDA requested but torch.cuda.is_available() is False; using CPU")
+            dev = "cpu"
+        elif want.startswith("xpu") and not xpu_ok:
+            LOG.warning("XPU requested but not available; using CPU")
             dev = "cpu"
         elif want == "mps" and not (mps and mps.is_available()):
             LOG.warning("MPS requested but not available; using CPU")
@@ -926,9 +941,15 @@ class VoiceEngine:
         self.notes = prepare_upstream(self.args.gpt_sovits_dir.resolve())
         import torch
         self.device, self.half = self._pick_device()
+        self.rocm = bool(getattr(torch.version, "hip", None))
         if self.device.startswith("cuda"):
             idx = torch.device(self.device).index or 0
             self.gpu = torch.cuda.get_device_name(idx)
+        elif self.device.startswith("xpu"):
+            try:
+                self.gpu = torch.xpu.get_device_name(0)
+            except Exception:  # noqa: BLE001
+                self.gpu = "Intel XPU"
         LOG.info("torch %s, device %s%s, %s", torch.__version__, self.device, f" ({self.gpu})" if self.gpu else "",
                  "fp16" if self.half else "fp32")
         with _Quiet(self.args.verbose) as q:
@@ -941,7 +962,7 @@ class VoiceEngine:
         tts_module = sys.modules.get(TTS.__module__)
         # upstream's plain GPT loop (CPU, MPS) has the floor already; importing its CUDA-graph package on those would
         # only change torch's global thread / precision settings
-        self.notes["eos_floor"] = install_eos_floor(MIN_GPT_TOKENS) if self.device.startswith("cuda") else "built in"
+        self.notes["eos_floor"] = install_eos_floor(MIN_GPT_TOKENS) if (self.device.startswith("cuda") and not self.rocm) else "built in"
         self.speed_ffmpeg = speed_uses_ffmpeg(tts_module)
         if self.speed_ffmpeg:   # a different upstream than the pinned one; it looks for ffmpeg in its own runtime/
             if self.ffmpeg:
@@ -1157,7 +1178,8 @@ class VoiceEngine:
             "fragment_interval": a.fragment_interval, "seed": int(opts.get("seed", a.seed)),
             "parallel_infer": True, "repetition_penalty": a.repetition_penalty,
             "streaming_mode": False, "return_fragment": False,
-            "use_cuda_graph": not a.no_cuda_graph, "use_flash_attention": True,
+            "use_cuda_graph": not a.no_cuda_graph and self.device.startswith("cuda") and not self.rocm,
+            "use_flash_attention": True,
         }
         if self.device.startswith("cuda"):
             import torch
@@ -1546,7 +1568,23 @@ class Server:
             return web.Response(text=f"{SERVER_NAME} {SERVER_VERSION}: GET /ping, /api/characters, /api/health; "
                                      "Socket.IO event tts_request_gateway\n")
 
-        app = web.Application()
+        token = (self.args.token or "").strip()
+
+        @web.middleware
+        async def require_token(request: web.Request, handler: Any) -> web.StreamResponse:
+            if not token or request.method == "OPTIONS" or request.path in ("/", "/ping"):
+                return await handler(request)
+            sent = request.headers.get("X-Api-Key") or request.headers.get("Authorization", "")
+            if sent.lower().startswith("bearer "):
+                sent = sent[7:]
+            if not hmac.compare_digest(sent.strip().encode(), token.encode()):
+                raise web.HTTPUnauthorized(text="missing or invalid service token\n")
+            return await handler(request)
+
+        if not token and self.args.host not in ("127.0.0.1", "localhost", "::1"):
+            LOG.warning("listening on %s with NO --token / SAKURA_SERVICE_TOKEN: anyone who can reach this port can use the voice server",
+                        self.args.host)
+        app = web.Application(middlewares=[require_token])
         self.sio.attach(app)
         app.router.add_get("/ping", ping)
         app.router.add_get("/api/characters", characters)

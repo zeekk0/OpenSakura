@@ -12,16 +12,24 @@ to the console. Ctrl+C stops everything (children are killed as a tree).
 """
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 11):
+    sys.exit(f"OpenSakura needs Python 3.11+ (recommend 3.11) because there is type hintings (this is {sys.version.split()[0]}). "
+             "Install one beside your Python (`uv python install 3.11`), then run scripts/setup.py (or Install_OpenSakura.bat).")
+
 import argparse
 import atexit
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -104,8 +112,11 @@ def spawn(name: str, cmd: list[str], cwd: Path, env: dict | None = None) -> subp
     e.update(env or {})
     e.setdefault("PYTHONIOENCODING", "utf-8")
     e.setdefault("PYTHONUNBUFFERED", "1")
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WIN else 0
-    p = subprocess.Popen(cmd, cwd=str(cwd), env=e, stdout=logf, stderr=subprocess.STDOUT, creationflags=flags)
+    if IS_WIN:
+        extra: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        extra = {"start_new_session": True}
+    p = subprocess.Popen(cmd, cwd=str(cwd), env=e, stdout=logf, stderr=subprocess.STDOUT, **extra)
     CHILDREN.append(p)
     log(f"started {name} (pid {p.pid}) → logs/{name}.log")
     return p
@@ -119,9 +130,22 @@ def kill_children() -> None:
             if IS_WIN:
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
             else:
-                p.terminate()
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    p.terminate()
         except Exception:  # noqa: BLE001
             pass
+    if not IS_WIN:   # give them some time to die
+        deadline = time.time() + 5
+        for p in CHILDREN:
+            while p.poll() is None and time.time() < deadline:
+                time.sleep(0.1)
+            if p.poll() is None:
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 atexit.register(kill_children)
@@ -146,7 +170,8 @@ def start_stt() -> subprocess.Popen | None:
     if not (cwd / "models" / "model.pt").exists():
         log("STT: services/stt/models/model.pt missing — run scripts/download_sensevoice.py (STT disabled)")
         return None
-    env = {"STT_HOST": "127.0.0.1", "STT_PORT": str(port), "STT_DEVICE": str(settings.get("stt.device", "cuda:0")),
+    env = {"STT_HOST": "127.0.0.1", "STT_PORT": str(port), "STT_DEVICE": str(settings.get("stt.device", "auto")),
+           "STT_THREADS": str(settings.get("stt.threads", 0) or ""),
            "STT_MODEL": str(cwd / "models")}
     return spawn("stt", [str(stt_python()), "api.py"], cwd, env)
 
@@ -183,6 +208,9 @@ def start_tts() -> subprocess.Popen | None:
         dev = str(settings.get("tts.device") or "auto")
         if dev != "auto":
             cmd += ["--device", dev]
+        extra = settings.get("tts.extra_args") or []   # e.g. ["--batch-size", "1"] on a CPU-only machine
+        if isinstance(extra, list):
+            cmd += [str(a) for a in extra]
         return spawn("tts", cmd, t["dir"], env)
     if t["kind"] == "legacy":   # an older engine bundle: one worker, WebUI.py serves the same contract
         return spawn("tts", [str(t["python"]), "-B", "WebUI.py", "--port", str(port), "--host", "127.0.0.1"],
@@ -270,7 +298,23 @@ def brain_rows() -> list[tuple[str, bool, str, bool]]:
         rows.append(("OPENROUTER_API_KEY", key, "set" if key else
                      "not set yet: paste it in Setup after starting, or put it in .env (or switch the roles to Ollama)", False))
     else:
-        rows.append(("OPENROUTER_API_KEY", True, "not needed (every role uses Ollama)", False))
+        rows.append(("OPENROUTER_API_KEY", True, "not needed (no role uses OpenRouter)", False))
+    if any(roles.get(r) == "openai" for r in ROLES):
+        base = str(settings.get("llm.openai.url") or "").strip().rstrip("/")
+        for tail in ("/chat/completions", "/completions"):
+            base = base[: -len(tail)] if base.endswith(tail) else base
+        up = False
+        if base:
+            hdr = {"Authorization": f"Bearer {settings.secret('OPENAI_COMPAT_API_KEY')}"} if settings.secret("OPENAI_COMPAT_API_KEY") else {}
+            try:   # any HTTP answer means something is listening
+                urllib.request.urlopen(urllib.request.Request(base + "/models", headers=hdr), timeout=3).close()
+                up = True
+            except urllib.error.HTTPError as e:
+                up = e.code not in (401, 403) and e.code < 500
+            except Exception:  # noqa: BLE001
+                up = False
+        rows.append(("openai-compatible server", up, f"{base or '(url not set)'}" + ("" if up else
+                     " not answering: start llama-server / LM Studio / your provider, or fix the URL in Setup → LLM"), True))
     wanted = sorted({str(settings.get(f"llm.ollama.{r}_model") or "") for r in ROLES if roles.get(r) == "ollama"} - {""})
     if wanted:
         url = str(settings.get("llm.ollama.url")).rstrip("/")
@@ -294,7 +338,9 @@ def check() -> int:
     rows: list[tuple[str, bool, str, bool]] = []   # (name, good, detail, required)
     stt_on = bool(settings.get("stt.enabled", True))
     tts_on = bool(settings.get("tts.enabled", True))
-    rows.append(("python", sys.version_info >= (3, 11), sys.version.split()[0], True))
+    _pv = sys.version_info[:2]
+    rows.append(("python", _pv >= (3, 11), sys.version.split()[0] + ("" if _pv in ((3, 11), (3, 12)) else
+                 "  (need 3.11 or 3.12)" if _pv < (3, 11) else "  (3.11 or 3.12 recommended)"), True))
     for mod in ("fastapi", "uvicorn", "httpx", "socketio", "pydantic", "multipart"):
         try:
             __import__(mod)
@@ -312,6 +358,12 @@ def check() -> int:
     rows.extend(tts_rows(tts_note, tts_on))
     for name, url in (("ollama", settings.get("llm.ollama.url") + "/api/tags"), ("stt", settings.get("stt.url") + "/health"), ("tts", settings.get("tts.url") + "/ping")):
         rows.append((f"live:{name}", http_ok(url), url, False))
+    try:   # what is the speech service really running on?
+        with urllib.request.urlopen(str(settings.get("stt.url")) + "/health", timeout=3) as r:
+            h = json.loads(r.read().decode("utf-8", "replace"))
+        rows.append(("stt device", True, f"{h.get('backend', '?')} · {h.get('device', '?')}" + (f" · {h['gpu_name']}" if h.get("gpu_name") else ""), False))
+    except Exception:  # noqa: BLE001
+        pass
     sp = int(settings.get("server.port", 8010))
     if port_free(sp):
         rows.append((f"server port {sp}", True, "free", True))

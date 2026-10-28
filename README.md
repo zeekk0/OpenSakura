@@ -37,24 +37,26 @@ majority where you live, to run her. The owner flirting can be switched off with
 
 | folder | what |
 |---|---|
-| `sakura/` | the brain (FastAPI). `brain.py` emotion / favorability / memory + actor prompt, `llm.py` OpenRouter ⇄ Ollama per role with a cost ledger, `tts_client.py` Socket.IO client for the TTS engine, `stt_client.py`, `action_controller.py` body-action chains, `server.py` HTTP + `/ws` |
+| `sakura/` | the brain (FastAPI). `brain.py` emotion / favorability / memory + actor prompt, `llm.py` OpenRouter ⇄ Ollama ⇄ any OpenAI-compatible server per role with a cost ledger, `tts_client.py` Socket.IO client for the TTS engine, `stt_client.py`, `action_controller.py` body-action chains, `server.py` HTTP + `/ws` |
 | `web/` | the page: VRM stage (`avatar.js` retargets GLB/FBX motion clips onto any VRM, `environment.js` the street), Play / Setup / State / About tabs |
 | `services/stt/` | the STT service (MekaHime-modified SenseVoiceSmall) |
 | `vendor/tts-engine/` | the voice server (`main.py`, a MekaHime build of GPT-SoVITS); `scripts/setup_tts.py` installs upstream GPT-SoVITS, its models and Sakura's voice next to it (see `vendor/tts-engine/README.md`) |
 | `config/` | `sakura.json` persona + sensitive words, `settings.example.json` runtime settings |
 | `discord/` | Discord bot mode (pending) |
 | `launch.py` | starts STT + the voice server + the backend, opens the browser (`--text-only` skips the voice services) |
-| `docs/` | [`OPENROUTER.md`](docs/OPENROUTER.md): key setup, roles, models, costs |
+| `distributed/` | optional: run STT/TTS on another machine (token auth, helper scripts, experimental Docker files) |
+| `docs/` | [`GETTING_STARTED.md`](docs/GETTING_STARTED.md) (beginner guide) · [`TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) · [`OPENROUTER.md`](docs/OPENROUTER.md): key setup, roles, models, costs · [`OPENAI_COMPATIBLE.md`](docs/OPENAI_COMPATIBLE.md): llama.cpp, LM Studio, vLLM, Groq and other OpenAI-API servers |
 
 ## Three ways to run her
 
 | | brain | ears + voice | needs | cost |
 |---|---|---|---|---|
-| **Fully local** (100% free) | Ollama, `qwen3:8b` | on your GPU | Windows 10/11 (Linux untested), NVIDIA RTX, 16 GB VRAM recommended (8–12 GB: use a 4B model), 16 GB RAM, ~20 GB disk | electricity only (~$0.01–0.03/h) |
-| **Semi-local** | OpenRouter (default `google/gemini-2.5-flash`) | on your GPU | Windows 10/11 (Linux untested), NVIDIA RTX, 6 GB VRAM, 16 GB RAM, ~15 GB disk | ~$0.003 per turn: ~$0.08/h of text chat, ~$0.31–0.36/h of continuous voice |
-| **Fully online** (text only) | OpenRouter | not available | any Windows / macOS / Linux PC with Python 3.11+ and a WebGL browser, no GPU | ~$0.003 per message |
+| **Fully local** (100% free) | Ollama or llama.cpp, `qwen3:8b` | on your GPU | Windows 10/11, Linux or macOS (see [non-NVIDIA hardware](#no-nvidia-gpu-linux-and-macos)), NVIDIA RTX, 16 GB VRAM recommended (8–12 GB: use a 4B model), 16 GB RAM, ~20 GB disk | electricity only (~$0.01–0.03/h) |
+| **Semi-local** | OpenRouter (default `google/gemini-2.5-flash`) | on your GPU | Windows 10/11, Linux or macOS, NVIDIA RTX, 6 GB VRAM, 16 GB RAM, ~15 GB disk | ~$0.003 per turn: ~$0.08/h of text chat, ~$0.31–0.36/h of continuous voice |
+| **Fully online** (text only) | OpenRouter | not available | any Windows / macOS / Linux PC with Python 3.11 or 3.12 and a WebGL browser, no GPU | ~$0.003 per message |
 
-Her voice and ears need a local NVIDIA GPU; everything else runs anywhere. Measured on an RTX 5070
+Her voice and ears are tuned for a local NVIDIA GPU, runs slower without one (see [no NVIDIA GPU](#no-nvidia-gpu-linux-and-macos)), everything else runs anywhere.
+The numbers below are measured on an Nvidia GeForce RTX 5070
 (12 GB), semi-local, on replies with 6–10 s of speech: speech recognition ~0.06 s, text reply ~1 s, voice
 ready ~1.9 s (~2 s after you stop talking); the voice server speaks 7 s of speech in ~0.75 s using ~2.3 GB
 of VRAM. Fully local is slower on that 12 GB card because the 8B model, speech recognition and her voice
@@ -65,26 +67,31 @@ how to spend less.
 
 ## Requirements
 
-- **Python 3.11+** for the backend (the text-only mode also runs on 3.13 / macOS). The voice server needs
-  **Python 3.11 or 3.12** (on Ubuntu 22.04 install `python3.11` and `python3.11-venv`).
-- Voice modes: Windows 10/11 with an NVIDIA GPU (RTX 50-series needs CUDA 12.8 wheels — the setup scripts
-  install them). Linux (glibc 2.28+, e.g. Ubuntu 20.04+) and macOS 14+ on Apple Silicon with a native arm64
-  Python should work the same way but are untested. ffmpeg is only needed for Opus output (WAV is the default).
-- An [OpenRouter](https://openrouter.ai) key **or** [Ollama](https://ollama.com) with a model (`ollama pull qwen3:8b`)
+- **Python 3.11 (recommended) or 3.12**, python3.11+ for text-only mode but recommend 3.11/12 so you dont need to reinstall the entire thing just to add a voice, because voice only support up to 3.12.
+  If you don't have one, install python3.11 next to your already-installed python (`uv python install 3.11`, python.org, pyenv, `winget install Python.Python.3.11`, or your package manager)
+- Hugging Face slow or blocked where you live? Set `HF_ENDPOINT` to a mirror (for example `https://hf-mirror.com`) before running the setup
+- Voice modes: Windows 10/11 with an NVIDIA GPU is the tested path (RTX 50-series needs CUDA 12.8 wheels).
+  Linux (glibc 2.28+, e.g. Ubuntu 20.04+) and macOS 14+ on Apple Silicon (native arm64 Python) are supported but not yet verified on real hardware;
+  a machine without an NVIDIA GPU falls back to Apple GPU / CPU automatically. ffmpeg is only needed for Opus output (WAV is the default).
+- New to all this? Double-click `Install_OpenSakura.bat` (also works as bash for linux/macos via black magic :p), or run `python scripts/oobe.py`, or read [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md)
+- Speech services on a different (GPU) machine? See [`distributed/README.md`](distributed/README.md).
+- An [OpenRouter](https://openrouter.ai) key, **or** [Ollama](https://ollama.com) with a model (`ollama pull qwen3:8b`), **or** any OpenAI-compatible server such as llama.cpp (see [`docs/OPENAI_COMPATIBLE.md`](docs/OPENAI_COMPATIBLE.md))
 
 ## Quick start: talk to her out loud
 
 Her voice is the heart of Sakura, so set it up first. This is for Windows 10/11 with an NVIDIA RTX GPU and
 takes about 20–30 minutes, most of it downloads (~12 GB). You need [Python 3.11](https://www.python.org/downloads/release/python-3119/)
-(tick **Add python.exe to PATH** in the installer) and [Git](https://git-scm.com/download/win).
+(3.12 also works; tick **Add python.exe to PATH** in the installer) and [Git](https://git-scm.com/download/win).
 
-**1. Install her ears and voice.** In PowerShell:
+**1. Install her ears and voice.** In cmd/PowerShell:
 
 ```powershell
 git clone https://github.com/zeekk0/OpenSakura.git
 cd OpenSakura
-powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1   # her brain and ears (speech recognition)
-python scripts\setup_tts.py                                          # her voice: type yes to accept her license
+.\scripts\setup.bat
+.venv\Scripts\python scripts\setup_tts.py
+
+
 ```
 
 Her voice model is free and needs no account. It is a MekaHime asset under a
@@ -100,6 +107,16 @@ streams with her. `setup_tts.py` shows this first and asks you to type `yes`, th
 If that row says `!!`, see [Voice troubleshooting](#voice-troubleshooting) and run the same command again: finished
 steps are verified and skipped, so a re-run takes seconds.
 
+**Linux / macOS** is the same except a little change for last 2 commands (same git clone and cd first):
+
+```bash
+bash scripts/setup.bat                     # her brain and ears; detects NVIDIA / AMD ROCm / Apple GPU / CPU for you
+.venv/bin/python scripts/setup_tts.py      # her voice (add --device cpu if you have no NVIDIA GPU and no Mac GPU)
+```
+
+`python scripts/setup.py` is the same as `scripts/setup.bat` btw (add `--text-only` to skip the speech services, `--device cpu` to
+force CPU-only PyTorch, `--dry-run` to see the commands first).
+
 **2. Give her a brain.** Pick one:
 
 - **OpenRouter (cloud, fastest, about $0.003 per turn).** Make an account at [openrouter.ai](https://openrouter.ai),
@@ -107,6 +124,7 @@ steps are verified and skipped, so a re-run takes seconds.
   file in the OpenSakura folder (`notepad .env`; the setup script created it) and put the key after
   `OPENROUTER_API_KEY=`. You can also paste it later in the page under **Setup → LLM**. Model choice and costs:
   [`docs/OPENROUTER.md`](docs/OPENROUTER.md).
+- **Any OpenAI-compatible server** (llama.cpp, LM Studio, vLLM, Groq, ...): see [`docs/OPENAI_COMPATIBLE.md`](docs/OPENAI_COMPATIBLE.md).
 - **Ollama (fully local, free).** See [Fully local with Ollama](#fully-local-with-ollama) below: install Ollama,
   `ollama pull qwen3:8b` (or `qwen3:4b` on an 8–12 GB card), then point her four LLM roles at it in **Setup → LLM**.
 
@@ -114,8 +132,10 @@ steps are verified and skipped, so a re-run takes seconds.
 
 ```powershell
 .venv\Scripts\python launch.py --check   # ends with "result: ready"; look for "OK tts speaker MekaHime_Sakura"
-Start_OpenSakura.bat                       # starts her ears, her voice and her brain, opens http://localhost:8010
+./Start_OpenSakura.bat                       # starts her ears, her voice and her brain, opens http://localhost:8010
 ```
+
+On Linux / macOS: `.venv/bin/python launch.py --check` instead of `.venv/Scripts/python`, dont worry `./Start_OpenSakura.bat` works here too
 
 `--check` marks real problems `!!`. A missing OpenRouter key shows as `--` (informational), because you can still
 paste it in Setup. `Start_OpenSakura.bat` prints `STT ready`, `TTS ready` and finally `ready → http://…`; the
@@ -126,15 +146,30 @@ push-to-talk, or type. She answers out loud with the emotion she feels (`【shy1
 Left-drag orbits, wheel zooms, right-drag up/down slides the focus from her head to her shoes; the ❯ tab hides
 the panel.
 
+### No NVIDIA GPU (Linux and macOS)
+
+| your machine | speech recognition (STT) | her voice (TTS) |
+|---|---|---|
+| NVIDIA (Windows / Linux) | CUDA, automatic | `setup_tts.py` (CUDA, automatic) |
+| Apple Silicon Mac | Apple GPU (MPS), automatic | `setup_tts.py` (picks the Mac build, MPS) |
+| AMD GPU on Linux | ROCm: `bash scripts/setup.bat --device rocm` | ROCm, **experimental**: `setup_tts.py --device rocm` (CPU fallback: `--device cpu`) |
+| Intel Arc GPU | XPU: `python scripts/setup.py --device xpu` | XPU, **experimental**: `setup_tts.py --device xpu` (CPU fallback: `--device cpu`) |
+| no GPU | CPU, small and fine for chat-length audio | CPU, works but much slower than a GPU (not benchmarked) |
+
+Speech recognition chooses its device by itself (`stt.device` in `config/settings.json`, default `auto`), `launch.py --check` shows what it picked.
+For a fully local brain without CUDA, run [llama.cpp](docs/OPENAI_COMPATIBLE.md) (CPU, Metal, Vulkan, ROCm builds exist) or Ollama.
+
 ### Voice troubleshooting
 
 | what you see | fix |
 |---|---|
 | `!! voice MekaHime_Sakura  not downloaded: her voice license was not accepted` | Re-run `python scripts\setup_tts.py` and type `yes` when it asks. |
 | `!! voice MekaHime_Sakura  download failed (network / HTTP error)` | Check your internet connection (Hugging Face must be reachable) and re-run; finished steps are skipped. |
-| `the voice engine needs Python 3.11 or 3.12` | Install [Python 3.11](https://www.python.org/downloads/release/python-3119/), then re-run (or `--python <path to python.exe>`). |
+| `the voice engine needs Python 3.11 or 3.12` | Install Python 3.11 *next to* the one you have (Windows: python.org or `winget install Python.Python.3.11`; any OS: `uv python install 3.11`), then re-ru (if your newly installed python is not found, pass `--python <path>`). |
 | `!! ollama model qwen3:8b  missing → ollama pull qwen3:8b` | Run that `ollama pull` command, or switch the roles to a model you have in **Setup → LLM**. |
 | `!! ollama  not answering at http://127.0.0.1:11434` | Start Ollama (or install it from [ollama.com/download](https://ollama.com/download)), or switch the roles back to OpenRouter. |
+| `stt` log says `requested device 'cuda:0' is not available ... using 'cpu'` | Speech recognition runs on the CPU cuz you dont have CUDA GPU, just fallback warning so safe to ignore. Set `stt.device` to `auto` to silence it. |
+| `./Start_OpenSakura.bat: Permission denied` | `chmod +x Start_OpenSakura.bat scripts/setup.bat`, or run `bash Start_OpenSakura.bat`. |
 | she replies in text but you hear nothing | `launch.py --check` and the Setup Health grid must show **TTS** green; give her ~30 s after starting; make sure **play voice** is ticked in Play; click the page once so the browser allows sound; on Safari keep the WAV format. |
 | she sounds cut off or very slow | Close other GPU-heavy apps. Fully local with the 8B model needs ~16 GB of VRAM; on 8–12 GB cards use `qwen3:4b` or OpenRouter. |
 
@@ -169,9 +204,14 @@ option if your GPU is small.
 
 ### Other setups
 
-On Linux (untested so far), `python3 scripts/setup_tts.py` installs the voice the same way; the
-speech-recognition service is set up by hand there (`services/stt/README.md`), or run
-`python launch.py --no-stt` and type.
+On Linux and macOS use `bash scripts/setup.bat` (ears and brain) and `scripts/setup_tts.py` (voice), see
+[Linux / macOS](#quick-start-talk-to-her-out-loud) above and [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md). To skip the ears,
+run `python launch.py --no-stt` and type.
+
+Slow machine, integrated graphics or a phone? Tick **Setup → Graphics → Light graphics** (or open
+`http://localhost:8010/?lite=1`) to turn off shadows, depth blur and antialiasing. Voice-server flags for weak hardware go in
+`tts.extra_args` (for example `["--batch-size", "1"]`), and `stt.threads` limits the CPU threads of speech recognition.
+More symptoms and fixes: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 Text-only, on any OS (no GPU, **no voice**: she is much less herself this way):
 
@@ -229,6 +269,7 @@ reaction, body actions, intimacy mode (18+). The toggles marked "(Discord mode, 
 | voice server (TTS) | 8002 | `tts.url` |
 | STT service | 50000 | `stt.url` |
 | Ollama | 11434 | `llm.ollama.url` |
+| OpenAI-compatible server (llama.cpp default) | 8080 | `llm.openai.url` |
 
 ## Notes
 

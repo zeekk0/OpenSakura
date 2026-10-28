@@ -37,3 +37,6 @@ Thumbs.db
 # never commit the atomic-write temp file
 config/settings.json.tmp
 *.tmp
+
+# distributed: shared service token
+distributed/.service_token

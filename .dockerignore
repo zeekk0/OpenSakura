@@ -1,0 +1,13 @@
+.git
+.venv
+**/.venv
+services/stt/models
+vendor/tts-engine/GPT-SoVITS
+vendor/tts-engine/Speakers
+vendor/tts-engine/cache
+data
+logs
+config/settings.json
+.env
+distributed/.service_token
+**/__pycache__

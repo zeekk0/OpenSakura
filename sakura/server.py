@@ -5,7 +5,7 @@ Serves the web page (three.js stage + Setup/Play panels) and exposes:
     GET  /api/health            live probes: LLM providers, STT, TTS, Discord
     GET  /api/settings          settings.json (+ which secrets are set)
     POST /api/settings          deep-merge partial settings
-    POST /api/secrets           write OPENROUTER_API_KEY / DISCORD_BOT_TOKEN to .env
+    POST /api/secrets           write OPENROUTER_API_KEY / OPENAI_COMPAT_API_KEY / DISCORD_BOT_TOKEN to .env
     GET  /api/state             emotions, dominant emotion, owner profile, uptime
     POST /api/chat              {text} -> one turn (reply via HTTP, audio/actions via /ws)
     POST /api/voice             multipart audio -> STT -> one turn
@@ -260,12 +260,14 @@ async def run_turn(text: str, *, user_id: int = WEB_USER_ID, display_name: str =
 # ==== API: health / settings / state ====
 @app.get("/api/health")
 async def api_health() -> dict:
-    or_h, ol_h, st_h, tt_h = await asyncio.gather(llm.openrouter_health(), llm.ollama_health(),
-                                                  stt_client.health(), tts.health())
     roles = settings.get("llm.roles", {})
+    or_h, ol_h, st_h, tt_h, oa_h = await asyncio.gather(
+        llm.openrouter_health(), llm.ollama_health(), stt_client.health(), tts.health(),
+        llm.openai_health() if "openai" in roles.values() else asyncio.sleep(0, {"ok": False, "configured": bool(settings.get("llm.openai.url")),
+                                                              "url": llm.openai_base(), "models": [], "error": "not used by any role"}))
     return {
         "ok": True, "mode": settings.get("mode"), "persona": brain.name,
-        "llm": {"roles": roles, "openrouter": or_h, "ollama": ol_h,
+        "llm": {"roles": roles, "openrouter": or_h, "ollama": ol_h, "openai": oa_h,
                 "models": {r: {"provider": roles.get(r), "model": llm.model_for(r)} for r in ("actor", "director", "action", "mod")}},
         "stt": {**st_h, "enabled": settings.get("stt.enabled")},
         "tts": {**tt_h, "enabled": settings.get("tts.enabled"), "character_id": settings.get("tts.character_id")},
@@ -292,6 +294,8 @@ async def api_set_settings(partial: dict) -> dict:
 
 class SecretsIn(BaseModel):
     OPENROUTER_API_KEY: Optional[str] = None
+    OPENAI_COMPAT_API_KEY: Optional[str] = None
+    SAKURA_SERVICE_TOKEN: Optional[str] = None
     DISCORD_BOT_TOKEN: Optional[str] = None
 
 
@@ -483,6 +487,11 @@ async def api_set_persona(body: dict) -> dict:
 @app.get("/api/llm/ollama/models")
 async def api_ollama_models() -> dict:
     return await llm.ollama_health()
+
+
+@app.get("/api/llm/openai/models")
+async def api_openai_models() -> dict:
+    return await llm.openai_health()
 
 
 class PullIn(BaseModel):

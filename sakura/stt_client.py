@@ -22,6 +22,11 @@ _LANGS = {"zh", "en", "yue", "ja", "ko", "nospeech"}
 _EMOS = {"HAPPY", "SAD", "ANGRY", "NEUTRAL", "FEARFUL", "DISGUSTED", "SURPRISED", "EMO_UNKNOWN"}
 
 
+def _auth() -> dict:
+    tok = settings.secret("SAKURA_SERVICE_TOKEN")
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
 def _base() -> str:
     return str(settings.get("stt.url", "http://127.0.0.1:50000")).rstrip("/")
 
@@ -40,7 +45,7 @@ async def transcribe(audio_bytes: bytes, filename: str = "utterance.wav",
     files = {"files": (filename, audio_bytes, "audio/wav")}
     data = {"lang": lang, "use_itn": "true" if use_itn else "false", "keys": "utterance"}
     url = f"{_base()}/api/v1/asr"
-    r = await http_clients.client(url).post(url, files=files, data=data, timeout=timeout)
+    r = await http_clients.client(url).post(url, files=files, data=data, headers=_auth(), timeout=timeout)
     r.raise_for_status()
     payload = r.json()
     results = payload.get("result") or []
@@ -61,5 +66,5 @@ async def health(timeout: float = 4.0) -> dict:
         ok = r.status_code == 200
         body = r.json() if ok else {}
         return {"ok": ok and body.get("status", "ok") == "ok", "url": base, "info": body}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return {"ok": False, "url": base, "error": str(e)[:200]}

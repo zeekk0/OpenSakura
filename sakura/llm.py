@@ -6,6 +6,10 @@ Each role is routed to a provider by ``settings.llm.roles``:
   json_object (the default).
 - ``ollama`` — local ``/api/chat`` with ``format: "json"``; ``think`` is
   disabled for reasoning models (qwen3, deepseek-r1, ...) unless configured.
+- ``openai`` — any OpenAI-compatible ``/chat/completions`` endpoint (llama.cpp's
+  ``llama-server``, LM Studio, vLLM, LocalAI, Jan, Groq, Together, OpenAI itself, ...).
+  Base URL, optional key and per-role model names are configurable; see
+  docs/OPENAI_COMPATIBLE.md.
 
 Callers ask for JSON; both providers are told to return a JSON object and the
 result is parsed leniently (first ``{...}`` block). A 4xx from OpenRouter is
@@ -39,7 +43,7 @@ def _empty_bucket() -> dict:
 
 
 def _empty_usage() -> dict:
-    return {"openrouter": _empty_bucket(), "ollama": _empty_bucket()}
+    return {"openrouter": _empty_bucket(), "ollama": _empty_bucket(), "openai": _empty_bucket()}
 
 
 def _load_lifetime() -> dict:
@@ -137,6 +141,28 @@ class LLMRejected(LLMError):
         super().__init__(f"LLM {status} ({model or '?'}): {snippet}")
 
 
+# ---- OpenAI-compatible provider helpers ----
+_openai_json_unsupported: set[str] = set()   # base URLs that rejected response_format
+_THINK_BLOCK = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+
+
+def openai_base() -> str:
+    """Normalised base URL (``http://host:port/v1``). Works for full completion endpoint too"""
+    base = str(settings.get("llm.openai.url", "http://127.0.0.1:8080/v1")).strip().rstrip("/")
+    for tail in ("/chat/completions", "/completions"):
+        if base.endswith(tail):
+            base = base[: -len(tail)]
+    return base.rstrip("/")
+
+
+def _openai_headers() -> dict:
+    h = {"Content-Type": "application/json"}
+    key = settings.secret("OPENAI_COMPAT_API_KEY")
+    if key:
+        h["Authorization"] = f"Bearer {key}"
+    return h
+
+
 def provider_for(role: str) -> str:
     return str(settings.get(f"llm.roles.{role}", "openrouter"))
 
@@ -166,7 +192,7 @@ async def chat(role: str, messages: list[dict], *, temperature: float = 0.9,
     """Return the assistant message content as text."""
     provider = provider_for(role)
     model = model_for(role, provider)
-    if not model:
+    if not model and provider != "openai": # some local servers with only 1 model allow no models
         raise LLMError(f"no model configured for role={role} provider={provider}")
 
     if provider == "openrouter":
@@ -238,6 +264,44 @@ async def chat(role: str, messages: list[dict], *, temperature: float = 0.9,
         record_usage("ollama", role, model, int(body.get("prompt_eval_count") or 0), int(body.get("eval_count") or 0), 0.0)
         return content
 
+    if provider == "openai":
+        base = openai_base()
+        if not base:
+            raise LLMError("OpenAI-compatible URL is not set (Setup → LLM)")
+        url = f"{base}/chat/completions"
+        payload = {"model": model or "default", "messages": messages, "temperature": temperature, "stream": False}
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        extra = settings.get("llm.openai.extra_body") or {}
+        if isinstance(extra, dict):
+            payload.update(extra) # e.g. {"chat_template_kwargs": {"enable_thinking": false}}
+        mode = str(settings.get("llm.openai.json_mode", "auto")).lower()   # auto | on | off
+        want_json = json_mode and mode != "off" and not (mode == "auto" and base in _openai_json_unsupported)
+        if want_json:
+            payload["response_format"] = {"type": "json_object"}
+        client = http_clients.client(url)
+        r = await client.post(url, json=payload, headers=_openai_headers(), timeout=timeout)
+        if (want_json and mode == "auto" and r.status_code in (400, 422)
+                and any(w in r.text.lower() for w in ("response_format", "json_object", "grammar", "json"))):
+            _openai_json_unsupported.add(base)
+            payload.pop("response_format", None)
+            r = await client.post(url, json=payload, headers=_openai_headers(), timeout=timeout)
+        if 400 <= r.status_code < 500:
+            raise LLMRejected(r.status_code, r.text, model)
+        if r.status_code >= 500:
+            raise LLMError(f"OpenAI-compatible server {r.status_code}: {r.text[:300]}")
+        body = r.json()
+        try:
+            content = body["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMError(f"OpenAI-compatible malformed response: {e}: {str(body)[:300]}")
+        content = _THINK_BLOCK.sub("", content).strip()   # reasoning models may inline <think>...</think>
+        u = body.get("usage") or {}
+        cost = u.get("cost") if isinstance(u.get("cost"), (int, float)) else 0.0
+        record_usage("openai", role, model or "default", int(u.get("prompt_tokens") or 0),
+                     int(u.get("completion_tokens") or 0), cost)
+        return content
+
     raise LLMError(f"unknown provider {provider!r} for role {role}")
 
 
@@ -273,6 +337,29 @@ async def ollama_health(timeout: float = 4.0) -> dict:
         return {"ok": True, "url": base, "models": models}
     except Exception as e:  # noqa: BLE001 — health probe
         return {"ok": False, "url": base, "error": str(e)[:200], "models": []}
+
+
+async def openai_health(timeout: float = 4.0) -> dict:
+    """Probe ``{base}/models`` (llama.cpp, LM Studio, vLLM, OpenAI all serve it). 
+    A server without that route still counts as up if it answers at all, so the list may be empty."""
+    base = openai_base()
+    configured = bool(settings.get("llm.openai.url"))
+    try:
+        url = f"{base}/models"
+        r = await http_clients.client(url).get(url, headers=_openai_headers(), timeout=timeout)
+        if r.status_code in (401, 403):
+            return {"ok": False, "url": base, "configured": configured, "error": f"{r.status_code}: key rejected", "models": []}
+        models: list[str] = []
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                items = data.get("data") if isinstance(data, dict) else None
+                models = [str(m.get("id")) for m in (items or []) if isinstance(m, dict) and m.get("id")]
+            except ValueError:
+                pass
+        return {"ok": r.status_code < 500, "url": base, "configured": configured, "models": models}
+    except Exception as e:
+        return {"ok": False, "url": base, "configured": configured, "error": str(e)[:200], "models": []}
 
 
 async def openrouter_health(timeout: float = 6.0) -> dict:

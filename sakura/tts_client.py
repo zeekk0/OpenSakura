@@ -70,7 +70,7 @@ class TTSClient:
                                        reconnection_delay=2, reconnection_delay_max=10, logger=False)
             self._register(sio)
             try:
-                await sio.connect(url, transports=["websocket"], wait_timeout=8)
+                await sio.connect(url, headers=_auth(), transports=["websocket"], wait_timeout=8)
             except Exception as e:  # noqa: BLE001
                 log.warning("TTS engine connect failed (%s): %s", url, e)
                 self._sio, self._url, self._connected = sio, url, False
@@ -193,11 +193,11 @@ class TTSClient:
         out: dict = {"url": url, "ok": False, "socket_connected": self._connected, "characters": []}
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.get(f"{url}/ping")
+                r = await client.get(f"{url}/ping")   # open on purpose: it is the "is it up" probe
                 out["ping"] = r.text.strip()[:40]
                 out["ok"] = r.status_code == 200
                 try:
-                    rc = await client.get(f"{url}/api/characters")
+                    rc = await client.get(f"{url}/api/characters", headers=_auth())
                     chars = rc.json().get("characters", {})
                     out["characters"] = sorted(chars.keys()) if isinstance(chars, dict) else []
                 except Exception:  # noqa: BLE001 — characters endpoint is optional on gateways
@@ -205,6 +205,11 @@ class TTSClient:
         except Exception as e:  # noqa: BLE001
             out["error"] = str(e)[:200]
         return out
+
+
+def _auth() -> dict:
+    tok = settings.secret("SAKURA_SERVICE_TOKEN")
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
 
 
 tts = TTSClient()

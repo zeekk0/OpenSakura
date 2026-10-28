@@ -132,6 +132,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // hand the main thread back for a moment (a message task: not throttled like timers in background tabs)
 const yieldTask = () => new Promise((r) => { const c = new MessageChannel(); c.port1.onmessage = () => r(); c.port2.postMessage(0); });
 
+// Light graphics mode: no antialiasing, pixel ratio 1, no shadows, no depth-of-field pass.
+export function isLite() {
+  try {
+    const q = new URLSearchParams(location.search).get('lite');
+    if (q !== null) return q !== '0';
+    return localStorage.getItem('sakura.lite') === '1';
+  } catch { return false; }
+}
+
 export class Avatar {
   constructor(canvas, opts = {}) {
     this.canvas = canvas;
@@ -139,8 +148,10 @@ export class Avatar {
     this.onStatus = opts.onStatus || (() => {});
     this.onProgress = opts.onProgress || (() => {});   // (stage, fraction 0..1) — drives the loading screen
     this.clipsBase = opts.clipsBase || 'assets/clips/';
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.lite = isLite();
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: !this.lite, alpha: true,
+                                              powerPreference: this.lite ? 'low-power' : 'default' });
+    this.renderer.setPixelRatio(this.lite ? 1 : Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(28, 1, 0.1, 50);
@@ -181,7 +192,7 @@ export class Avatar {
     ring.rotation.x = -Math.PI / 2; ring.position.y = 0.005;
     this.scene.add(ring);
     this._addGodRay();
-    try { this.env = new Environment(this.scene, this.renderer, this.camera); this.env.focusTarget = this.controls.target; }
+    try { this.env = new Environment(this.scene, this.renderer, this.camera, this.lite ? { dof: false, shadows: false } : {}); this.env.focusTarget = this.controls.target; }
     catch (e) { console.warn('[avatar] environment failed to build:', e); this.env = null; }
 
     this.clock = new THREE.Clock();
