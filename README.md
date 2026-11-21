@@ -230,6 +230,12 @@ reaction, body actions, intimacy mode (18+). The toggles marked "(Discord mode, 
 | STT service | 50000 | `stt.url` |
 | Ollama | 11434 | `llm.ollama.url` |
 
+The server answers only its own page and programs such as the launcher or curl: a request from another web site
+open in your browser is refused (403), and no other site can read its answers. Open the page at
+`http://localhost:8010` or `http://127.0.0.1:8010`; if you set `server.host` so other devices can reach it, this
+PC's IP address works too. To open it by a name instead (for example `mypc.local`), add that name to
+`server.allowed_hosts` in `config/settings.json`.
+
 ## Notes
 
 - The page shows a small "Support MekaHime" popup two minutes after loading and every 30 minutes; it has

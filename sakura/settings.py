@@ -89,7 +89,8 @@ DEFAULTS: dict[str, Any] = {
         "respond_to_bots": False,
     },
     "memory": {"consolidation_interval": 4},
-    "server": {"host": "127.0.0.1", "port": 8010, "open_browser": True},
+    # allowed_hosts: other names the page may be opened by, e.g. ["mypc.local"] (localhost and IP addresses always work)
+    "server": {"host": "127.0.0.1", "port": 8010, "open_browser": True, "allowed_hosts": []},
     "discord": {"guild_id": "", "channel_ids": [], "stage_channel_id": "", "error_channel_id": ""},
 }
 

@@ -362,6 +362,7 @@ def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     host = args.host or str(settings.get("server.host", "127.0.0.1"))
+    os.environ["SAKURA_BIND_HOST"] = host    # the server's origin guard takes this name as its own (origin_guard.py)
     port = args.port or int(settings.get("server.port", 8010))
 
     procs: list[tuple[str, str, subprocess.Popen | None, float]] = []

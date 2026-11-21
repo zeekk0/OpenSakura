@@ -19,6 +19,9 @@ Serves the web page (three.js stage + Setup/Play panels) and exposes:
 
 Every /ws message is a JSON object with a `type`; reply messages carry `content` and
 `emotion_state`, action messages `action_chain`, audio messages base64 `audio_data`.
+
+Only Sakura's own page and programs without a browser may use any of this; requests from other
+web sites are refused before a route runs (origin_guard.py).
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ import asyncio
 import base64
 import collections
 import logging
+import os
 import sys
 import time
 import uuid
@@ -33,7 +37,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -49,6 +52,7 @@ import stt_client  # noqa: E402
 import tts_emotion_mapper  # noqa: E402
 from action_controller import ActionController  # noqa: E402
 from brain import WEB_USER_ID, brain  # noqa: E402
+from origin_guard import OriginGuard  # noqa: E402
 from sensitive_words import WordBank  # noqa: E402
 from settings import DATA_DIR, LOG_DIR, SECRET_KEYS, WEB_DIR, settings  # noqa: E402
 from tts_client import TTSError, tts  # noqa: E402
@@ -57,7 +61,10 @@ log = logging.getLogger("sakura.server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)-16s %(levelname)-5s %(message)s")
 
 app = FastAPI(title="OpenSakura", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# Other web sites in the same browser may neither call the API nor read it (no CORS); see origin_guard.py.
+# SAKURA_BIND_HOST: the address launch.py serves on (its --host can differ from server.host in the settings).
+app.add_middleware(OriginGuard, extra_hosts=lambda: (settings.get("server.host"), settings.get("server.allowed_hosts"),
+                                                     os.environ.get("SAKURA_BIND_HOST")))
 
 actions = ActionController()
 HISTORY: collections.deque = collections.deque(maxlen=10)        # (user_text, reply)
